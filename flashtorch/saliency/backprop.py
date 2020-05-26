@@ -39,7 +39,6 @@ class Backprop:
         self.model = model
         self.model.eval()
         self.gradients = None
-        self._register_conv_hook()
 
     def calculate_gradients(self,
                             input_,
@@ -84,6 +83,7 @@ class Backprop:
             self.model = self.model.to('cuda')
             input_ = input_.to('cuda')
 
+        h = self._register_conv_hook(input_)
         self.model.zero_grad()
 
         self.gradients = torch.zeros(input_.shape)
@@ -134,6 +134,7 @@ class Backprop:
 
             gradients = gradients.max(dim=0, keepdim=True)[0]
 
+        h.remove()
         return gradients
 
     def visualize(self, input_, target_class, guided=False, use_gpu=False,
@@ -217,16 +218,16 @@ class Backprop:
     # Private interface #
     #####################
 
-    def _register_conv_hook(self):
-        def _record_gradients(module, grad_in, grad_out):
+    def _register_conv_hook(self, image):
+        def _record_gradients(grad_in):
             if self.gradients.shape == grad_in[0].shape:
                 self.gradients = grad_in[0]
+            elif self.gradients.shape == grad_in.shape:
+                self.gradients = grad_in
 
-        for _, module in self.model.named_modules():
-            if isinstance(module, nn.modules.conv.Conv2d) and \
-                    module.in_channels == 3:
-                module.register_backward_hook(_record_gradients)
-                break
+        image.requires_grad = True
+        return image.register_hook(_record_gradients)
+
 
     def _register_relu_hooks(self):
         def _record_output(module, input_, output):
