@@ -29,8 +29,10 @@ class GradientAscent:
             <https://pytorch.org/docs/stable/torchvision/models.html>`_,
             typically without the fully-connected part of the network.
             e.g. torchvisions.alexnet(pretrained=True).features
-        img_size (int, optional, default=224): The size of an input image to be
+        img_size (array of int, optional, default=[224, 224]): The size of an input image to be
             optimized.
+        channels (int, optional, default=3): The amount of channels the input image should have
+            (e.g. 3 for RGB, 1 for GRAY).
         lr (float, optional, default=1.): The step size (or learning rate) of
             the gradient ascent.
         use_gpu (bool, optional, default=False): Use GPU if set to True and
@@ -42,11 +44,14 @@ class GradientAscent:
     # Public interface #
     ####################
 
-    def __init__(self, model, img_size=224, lr=1., use_gpu=False):
+    def __init__(self, model, img_size=[224, 224], lr=1., use_gpu=False, channels=3, means=None, stds=None, plot=True):
         self.model = model
         self._img_size = img_size
         self._lr = lr
         self._use_gpu = use_gpu
+        self._channels = channels
+        self._means = means
+        self._stds = stds
 
         self.num_layers = len(list(self.model.named_children()))
         self.activation = None
@@ -55,6 +60,8 @@ class GradientAscent:
         self.handlers = []
 
         self.output = None
+        self._use_cuda = False
+        self.plot = plot
 
     @property
     def lr(self):
@@ -71,6 +78,14 @@ class GradientAscent:
     @img_size.setter
     def img_size(self, img_size):
         self._img_size = img_size
+
+    @property
+    def channels(self):
+        return self._channels
+
+    @channels.setter
+    def img_size(self, channels):
+        self._channels = channels
 
     @property
     def use_gpu(self):
@@ -111,10 +126,11 @@ class GradientAscent:
 
         if input_ is None:
             input_ = np.uint8(np.random.uniform(
-                150, 180, (self._img_size, self._img_size, 3)))
-            input_ = apply_transforms(input_, size=self._img_size)
+                150, 180, (self._img_size[0], self._img_size[1], self.channels)))
+            input_ = apply_transforms(input_, size=self._img_size, means=self._means, stds=self._stds)
 
         if torch.cuda.is_available() and self.use_gpu:
+            self._use_cuda = True
             self.model = self.model.to('cuda')
             input_ = input_.to('cuda')
 
@@ -123,10 +139,10 @@ class GradientAscent:
         while len(self.handlers) > 0:
             self.handlers.pop().remove()
 
+        self.model(input_)
         # Register hooks to record activation and gradients
-
         self.handlers.append(self._register_forward_hooks(layer, filter_idx))
-        self.handlers.append(self._register_backward_hooks())
+        self.handlers.append(self._register_backward_hooks(input_, self._channels))
 
         # Inisialize gradients
 
@@ -247,14 +263,15 @@ class GradientAscent:
         self._lr = lr
         output = self.optimize(layer, filter_idx, input_, num_iter=num_iter)
 
-        plt.figure(figsize=figsize)
-        plt.axis('off')
-        plt.title(title)
+        if self.plot:
+            plt.figure(figsize=figsize)
+            plt.axis('off')
+            plt.title(title)
 
-        plt.imshow(format_for_plotting(
-            standardize_and_clip(output[-1],
-                                 saturation=0.15,
-                                 brightness=0.7))); # noqa
+            plt.imshow(format_for_plotting(
+                standardize_and_clip(output[-1],
+                                     saturation=0.15,
+                                     brightness=0.7))); # noqa
 
         if return_output:
             return output
@@ -269,15 +286,12 @@ class GradientAscent:
 
         return layer.register_forward_hook(_record_activation)
 
-    def _register_backward_hooks(self):
-        def _record_gradients(module, grad_in, grad_out):
-            if self.gradients.shape == grad_in[0].shape:
-                self.gradients = grad_in[0]
+    def _register_backward_hooks(self, input_, in_channels=3):
+        def _record_gradients(grad_in):
+            if self.gradients.shape == grad_in.shape:
+                self.gradients = grad_in
 
-        for _, module in self.model.named_modules():
-            if isinstance(module, nn.modules.conv.Conv2d) and \
-                    module.in_channels == 3:
-                return module.register_backward_hook(_record_gradients)
+        return input_.register_hook(_record_gradients)
 
     def _ascent(self, x, num_iter):
         output = []
@@ -286,7 +300,6 @@ class GradientAscent:
             self.model(x)
 
             self.activation.backward()
-
             self.gradients /= (torch.sqrt(torch.mean(
                 torch.mul(self.gradients, self.gradients))) + 1e-5)
 
@@ -298,21 +311,28 @@ class GradientAscent:
     def _validate_filter_idx(self, num_filters, filter_idx):
         if not np.issubdtype(type(filter_idx), np.integer):
             raise TypeError('Indecies must be integers.')
-        elif (filter_idx < 0) or (filter_idx > num_filters):
+        elif (filter_idx < 0) or (filter_idx >= num_filters):
             raise ValueError(f'Filter index must be between 0 and \
                              {num_filters - 1}.')
 
     def _visualize_filter(self, layer, filter_idx, num_iter, figsize, title):
         self.output = self.optimize(layer, filter_idx, num_iter=num_iter)
 
-        plt.figure(figsize=figsize)
-        plt.axis('off')
-        plt.title(title)
+        if self.plot:
+            plt.figure(figsize=figsize)
+            plt.axis('off')
+            plt.title(title)
 
-        plt.imshow(format_for_plotting(
-            standardize_and_clip(self.output[-1],
-                                 saturation=0.15,
-                                 brightness=0.7))); # noqa
+            temp = format_for_plotting(standardize_and_clip(self.output[-1],
+                                        saturation=0.15,
+                                        brightness=0.7))
+
+            if temp.shape[0] == 3:
+                plt.imshow(temp)
+            else:
+                fig, axes = plt.subplots(1, temp.shape[0])
+                for i in range(temp.shape[0]):
+                    axes[i].imshow(temp[i])
 
     def _visualize_filters(self, layer, filter_idxs, num_iter, num_subplots,
                            title):
@@ -321,9 +341,10 @@ class GradientAscent:
         num_cols = 4
         num_rows = int(np.ceil(num_subplots / num_cols))
 
-        fig = plt.figure(figsize=(16, num_rows * 5))
-        plt.title(title)
-        plt.axis('off')
+        if self.plot:
+            fig = plt.figure(figsize=(16, num_rows * 5))
+            plt.title(title)
+            plt.axis('off')
 
         self.output = []
 
@@ -334,14 +355,16 @@ class GradientAscent:
 
             self.output.append(output)
 
-            ax = fig.add_subplot(num_rows, num_cols, i+1)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            ax.set_title(f'filter {filter_idx}')
+            if self.plot:
+                ax = fig.add_subplot(num_rows, num_cols, i+1)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                ax.set_title(f'filter {filter_idx}')
 
-            ax.imshow(format_for_plotting(
-                standardize_and_clip(output[-1],
-                                     saturation=0.15,
-                                     brightness=0.7)))
+                ax.imshow(format_for_plotting(
+                    standardize_and_clip(output[-1],
+                                         saturation=0.15,
+                                         brightness=0.7)))
 
-        plt.subplots_adjust(wspace=0, hspace=0); # noqa
+        if self.plot:
+            plt.subplots_adjust(wspace=0, hspace=0); # noqa
