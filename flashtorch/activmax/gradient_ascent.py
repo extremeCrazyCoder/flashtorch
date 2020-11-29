@@ -44,7 +44,7 @@ class GradientAscent:
     # Public interface #
     ####################
 
-    def __init__(self, model, target_img, img_size=[224, 224], lr=1., use_gpu=False, channels=3, means=None, stds=None, plot=True):
+    def __init__(self, model, target_img=None, img_size=[224, 224], lr=1., use_gpu=False, channels=3, means=None, stds=None, plot=True):
         self.model = model
         self._img_size = img_size
         self._lr = lr
@@ -63,9 +63,11 @@ class GradientAscent:
         self._use_cuda = False
         self.plot = plot
 
-        self.target_img = torch.as_tensor(target_img)
-        if torch.cuda.is_available() and self.use_gpu:
-            self.target_img = self.target_img.to('cuda')
+        self.target_img = None
+        if target_img is not None:
+            self.target_img = torch.as_tensor(target_img)
+            if torch.cuda.is_available() and self.use_gpu:
+                self.target_img = self.target_img.to('cuda')
 
     @property
     def lr(self):
@@ -286,8 +288,11 @@ class GradientAscent:
 
     def _register_forward_hooks(self, layer, filter_idx):
         def _record_activation(module, input_, output):
-            self.activation = torch.mean(torch.exp(torch.mul(-1,
-                  torch.abs(torch.sub(output[:, filter_idx, :, :], self.target_img)))))
+            if self.target_img is not None:
+                self.activation = torch.mean(torch.exp(torch.mul(-1,
+                      torch.abs(torch.sub(output[:, filter_idx, :, :], self.target_img)))))
+            else:
+                self.activation = torch.mean(output[:, filter_idx, :, :])
 
         return layer.register_forward_hook(_record_activation)
 
